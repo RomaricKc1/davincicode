@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 pub struct Game {
     pub state: GameState,
     pub players: Vec<Player>,
+    pub lost_players: Vec<Player>,
     pub winner: Option<Player>,
     pub card_avail: Vec<Card>,
     pub set_cards: u32,
@@ -63,7 +64,8 @@ impl Game {
 
         Game {
             state: GameState::INIT,
-            players: empty_players,
+            players: empty_players.clone(),
+            lost_players: empty_players.clone(),
             winner: None,
             card_avail: empty_cards,
             set_cards: set_number,
@@ -167,8 +169,6 @@ impl Game {
 
     pub fn game_status(&mut self) -> bool {
         // check players to see if any has all the cards revealed
-        let mut players_to_remove: Vec<Player> = Vec::new();
-
         for player in self.players.iter_mut() {
             // a given player: iterate through their deck
             let player_revealed_card = player
@@ -185,14 +185,13 @@ impl Game {
             if player_revealed_card as u32 == player.ncards {
                 // player lost as all cards revealed
                 player.status = PlayerStatus::LOST;
-
-                players_to_remove.push(player.clone());
+                self.lost_players.push(player.clone());
             }
         }
 
         // TODO: use retain
         // remove the players that lost from the vector
-        for lost_player in players_to_remove.iter() {
+        for lost_player in self.lost_players.iter() {
             // println!("Removing {}\n", lost_player.name);
 
             let idx = self

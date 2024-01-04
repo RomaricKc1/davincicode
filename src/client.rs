@@ -8,12 +8,33 @@ use tokio::sync::{Mutex, Notify};
 use tokio::task;
 use tokio::time::{self, Duration};
 
+use clap::Parser;
+
+/// The client to the davinci code game
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// User name
+    #[arg(short, long)]
+    name: String,
+
+    /// Server address
+    #[arg(short, long)]
+    addr: String,
+
+    /// Server port
+    #[arg(short, long)]
+    port: String,
+}
+
 #[tokio::main]
 async fn main() {
-    let address = "127.0.0.1:8078";
+    let args = Args::parse();
+
+    let address = format!("{}:{}", args.addr, args.port);
     let mut buffer = [0u8; 1024];
 
-    let mut stream = TcpStream::connect(address).await.unwrap();
+    let mut stream = TcpStream::connect(address.clone()).await.unwrap();
     println!("{} {}", "Connected to server at".green(), address);
 
     // send the "init" message after connecting
@@ -26,13 +47,7 @@ async fn main() {
     println!("{} {}", "Response from server:".blue(), response);
 
     // send your name
-    print!("Enter your name: ");
-    io::stdout().flush().unwrap();
-
-    let mut name = String::new();
-    io::stdin().read_line(&mut name).unwrap();
-
-    let name = name.trim();
+    let name = args.name.trim();
     stream.write_all(name.as_bytes()).await.unwrap();
     stream.flush().await.unwrap();
 

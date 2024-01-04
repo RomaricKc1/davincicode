@@ -1,4 +1,4 @@
-use colored::*;
+use colored::Colorize;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -6,6 +6,21 @@ use std::{u32, vec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
+
+use clap::Parser;
+
+/// The Server of the davinci code game
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Server address
+    #[arg(short, long)]
+    addr: String,
+
+    /// Server port
+    #[arg(short, long)]
+    port: String,
+}
 
 const GAME_END_CODE: i32 = -44;
 const CARD_MAX_VAL: u32 = 11;
@@ -96,7 +111,6 @@ async fn yes_variant_guess(
         // println!("Continuing with guess");
 
         let game_ended = the_game.game_status(); // probably modified the players vec
-
         if game_ended {
             // game has ended
             *dialog_status = GAME_END_CODE;
@@ -605,6 +619,16 @@ async fn game_process(
             // game end
             break;
         }
+        // report to lost players
+        for lost_player in the_game.lost_players.iter() {
+            let to_send = format!("{}", "You lost. Sorry".red());
+
+            if player_tcp_name.contains_key(&lost_player.name.clone()) {
+                let stream = player_tcp_name.get_mut(&lost_player.name.clone()).unwrap();
+                send_something(stream, &to_send).await;
+            }
+        }
+
         // get next player
         let next_player = match player_order.last() {
             Some(player) => player_tcp_name.keys().find(|&name| name != player),
@@ -870,8 +894,11 @@ async fn recv_something(stream: &mut TcpStream) -> String {
 
 #[tokio::main]
 async fn main() {
-    let address = "127.0.0.1:8078";
-    let listener = TcpListener::bind(address).await.unwrap();
+    let args = Args::parse();
+
+    let address = format!("{}:{}", args.addr, args.port);
+
+    let listener = TcpListener::bind(address.clone()).await.unwrap();
     println!("{} {}", "Server listening on".green(), address);
 
     let client_streams_vec = Arc::new(Mutex::new(Vec::new()));
