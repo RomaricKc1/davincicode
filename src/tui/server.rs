@@ -2,10 +2,28 @@ use colored::Colorize;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{u32, vec};
+use std::{error::Error, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::{sleep, Duration};
+
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::prelude::{
+    Alignment, Backend, Constraint, CrosstermBackend, Direction, Frame, Layout, Span,
+};
+use ratatui::widgets::*;
+
+use ratatui::Terminal;
+
+const GAME_END_CODE: i32 = -44;
+const CARD_MAX_VAL: u32 = 11;
+const CARD_PER_PLAYER: u32 = 4;
+const START_CARD_N: u32 = 24;
 
 use clap::Parser;
 
@@ -14,24 +32,23 @@ use clap::Parser;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Server address
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = String::from("8079"))]
     addr: String,
 
     /// Server port
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
     port: String,
-}
 
-const GAME_END_CODE: i32 = -44;
-const CARD_MAX_VAL: u32 = 11;
-const CARD_PER_PLAYER: u32 = 4;
-const START_CARD_N: u32 = 24;
+    /// Number of players
+    #[arg(short, long, default_value_t = 2)]
+    nplayers: u16,
+}
 
 async fn loop_read_uint(stream: &mut TcpStream, msg: String, range: Vec<u32>) -> Option<u32> {
     let result: u32;
 
     if range.len() > 2 {
-        println!("Only 2 values allowed (min-max).");
+        println!("Only 2 value allowed (min-max).");
         return None;
     }
 
@@ -40,12 +57,11 @@ async fn loop_read_uint(stream: &mut TcpStream, msg: String, range: Vec<u32>) ->
         let mut to_send = String::new();
         let msg = format!("{} (0-{})", msg, max);
 
-        to_send.push_str(format!("{}\n", msg.blue()).as_str());
+        to_send.push_str(format!("{}\n", msg).as_str());
         if send_something(stream, &to_send).await {
             return None;
         }
 
-        // while the entered number ain't correct, keep asking
         let response = recv_something(stream).await;
         let parsed_response = response.parse::<u32>();
 
@@ -56,9 +72,7 @@ async fn loop_read_uint(stream: &mut TcpStream, msg: String, range: Vec<u32>) ->
                     break;
                 }
             }
-            Err(_) => {
-                println!("{}", "Failed to parse user input to u32".red());
-            }
+            Err(_) => {}
         }
     }
 
@@ -81,26 +95,24 @@ async fn loop_read_str(
         let mut to_send = String::new();
         let msg = format!("{} ({}/{})", msg, variant[0], variant[1]);
 
-        to_send.push_str(format!("{}\n", msg.blue()).as_str());
+        to_send.push_str(format!("{}\n", msg).as_str());
         if send_something(stream, &to_send).await {
             return None;
         }
 
-        // while the entered number ain't correct, keep asking
         let response = recv_something(stream).await;
-        match response.as_str() {
+        match response.trim() {
             value => {
                 if value == v0 || value == v1 {
                     return Some(response);
-                } else {
-                    println!("{}\n", "Dunno, asking again".red());
                 }
             }
         }
     }
 }
 
-async fn yes_variant_guess(
+async fn yes_variant_guess<B: Backend>(
+    terminal: &mut Terminal<B>,
     stream: &mut TcpStream,
     player_name: String,
     the_game: &mut davincicode::Game,
@@ -111,9 +123,15 @@ async fn yes_variant_guess(
         // println!("Continuing with guess");
 
         let game_ended = the_game.game_status(); // probably modified the players vec
+
         if game_ended {
             // game has ended
             *dialog_status = GAME_END_CODE;
+
+            the_game
+                .logs
+                .push_str(format!("{}", "No more opponent\n").as_str());
+            let _ = update_ui(terminal, the_game).await;
 
             return -1;
         }
@@ -126,16 +144,21 @@ async fn yes_variant_guess(
             }
         }
 
-        println!(
-            "{} {:?}\n",
-            "The opponents_names:".yellow(),
-            opponents_names
-        );
+        the_game
+            .logs
+            .push_str(format!("{} {:?}\n", "The opponents_names:", opponents_names).as_str());
+        let _ = update_ui(terminal, the_game).await;
 
         let mut continue_guess = false;
 
-        let returned_val =
-            guess_opponent_card_loop(stream, the_game, opponents_names.clone(), &player_name).await;
+        let returned_val = guess_opponent_card_loop(
+            terminal,
+            stream,
+            the_game,
+            opponents_names.clone(),
+            &player_name,
+        )
+        .await;
 
         if returned_val == 1 {
             // good guess, either continue or break and save hidden card
@@ -173,13 +196,13 @@ async fn yes_variant_guess(
     0
 }
 
-async fn player_move(
+async fn player_move<B: Backend>(
+    terminal: &mut Terminal<B>,
     player_name: String,
     player_tcp_name: &mut HashMap<String, TcpStream>,
     the_game: &mut davincicode::Game,
-) {
+) -> i32 {
     let mut dialog_status: i32 = -1;
-    // current player stream
     let stream = player_tcp_name.get_mut(&(player_name.clone())).unwrap();
 
     // get current players card both own view and opponent view and show it to them
@@ -193,7 +216,6 @@ async fn player_move(
 
     the_game.shuffle_avail_card();
 
-    // tell the current player to move
     let current_player = the_game
         .players
         .iter()
@@ -202,19 +224,14 @@ async fn player_move(
 
     if can_t_draw_any {
         // no more cards on the set to draw, so take turn guessing op card
-        game_context.push_str(
-            format!("\n{}\n", "No more cards avail. Only guessing now.".yellow()).as_str(),
-        );
+        game_context
+            .push_str(format!("\n{}\n", "No more cards avail. Only guessing now.\n").as_str());
     } else {
-        game_context.push_str(format!("\n{}\n", "All avail cards: ".green()).as_str());
-        game_context.push_str(&the_game.show_avail_cards(true));
-        // hide values = false, debug purpose
-        println!(
-            "{} {}",
-            "Current game set:".blue(),
-            &the_game.show_avail_cards(false)
-        );
+        game_context.push_str(format!("{}", "All avail cards: **").as_str());
+        game_context.push_str(&the_game.show_avail_cards(true, false));
+        game_context.push_str("**");
     }
+    let _ = update_ui(terminal, the_game).await;
 
     // build the opponents_names with the new players (if any player lost and got removed)
     let mut opponents_names: Vec<String> = Vec::new();
@@ -223,35 +240,44 @@ async fn player_move(
             opponents_names.push(String::from(&p.name));
         }
     }
-    game_context.push_str(format!("\n{}", "Your opponents deck: ".yellow()).as_str());
+    game_context.push_str(format!("\n{}", "Your opponents deck: ").as_str());
     for opponent in the_game.players.iter() {
         if opponent.name == String::from(opponents_names.get(0).unwrap()) {
-            game_context.push_str(format!("\n{}", "Player: ".blue()).as_str());
+            game_context.push_str(format!("\n{}", "Player: ").as_str());
             game_context.push_str(&opponent.name);
-            game_context.push_str(format!("{}", " ".blue()).as_str());
-            game_context.push_str(&opponent.show_hand(true));
+            game_context.push_str(format!("{}", " ").as_str());
+            game_context.push_str(&opponent.show_hand(true, false));
         }
     }
-    game_context.push_str(format!("{}", "Your deck: ".green()).as_str());
-    game_context.push_str(&current_player.show_hand(false));
-    game_context.push_str(format!("{}", "What your opponents see: ".yellow()).as_str());
-    game_context.push_str(&current_player.show_hand(true));
+    if send_something(stream, &game_context).await {
+        return 1;
+    }
+
+    game_context.clear();
+    game_context.push_str(format!("{}", "Your deck: ##").as_str());
+    game_context.push_str(&current_player.show_hand(false, false));
+    game_context.push_str("##");
+    if send_something(stream, &game_context).await {
+        return 1;
+    }
+
+    game_context.clear();
+    game_context.push_str(format!("{}", "What your opponents see: ").as_str());
+    game_context.push_str(&current_player.show_hand(true, false));
 
     game_context.push_str("\n");
+    if send_something(stream, &game_context).await {
+        return 1;
+    }
 
     // read user input (card to pick)
     let picked_card_number: usize;
     let mut current_player_side_card: Option<davincicode::Card> = None;
 
     if can_t_draw_any == false {
-        let to_send = format!(
-            "{} {}{}\n",
-            "It's your turn".blue(),
-            player_name,
-            game_context,
-        );
+        let to_send = format!("{} {}\n", "It's your turn", player_name,);
         if send_something(stream, &to_send).await {
-            return;
+            return 1;
         }
 
         let value = loop_read_uint(
@@ -271,6 +297,8 @@ async fn player_move(
                 );
             }
         }
+
+        let _ = update_ui(terminal, the_game).await;
     }
 
     // continue to ask if they want to keep it hidden now or guess opponent card
@@ -280,23 +308,24 @@ async fn player_move(
         if can_t_draw_any == false {
             let mut to_send = String::new();
 
-            to_send.push_str(format!("{}", "You picked a ".blue()).as_str());
+            to_send.push_str(format!("{}", "You picked a ").as_str());
             let the_card = current_player_side_card.expect("No card picked");
             match the_card.color {
                 davincicode::Color::BLACK => {
-                    to_send.push_str(
-                        format!("{}{}", "B".blue(), the_card.value.to_string().blue()).as_str(),
-                    );
+                    to_send.push_str(format!("{}{}", "B", the_card.value.to_string()).as_str());
                 }
                 davincicode::Color::WHITE => {
-                    to_send.push_str(
-                        format!("{}{}", "W".yellow(), the_card.value.to_string().yellow()).as_str(),
-                    );
+                    to_send.push_str(format!("{}{}", "W", the_card.value.to_string()).as_str());
                 }
             }
-            to_send.push_str(format!("\n{}\n", "Saving it as side card.".blue()).as_str());
+            to_send.push_str(format!("\n{}\n", "Saving it as side card.").as_str());
+
+            to_send.push_str(format!("{}", "All avail cards: **").as_str());
+            to_send.push_str(&the_game.show_avail_cards(true, false));
+            to_send.push_str("**");
+
             if send_something(stream, &to_send).await {
-                return;
+                return 1;
             }
 
             // player drawn a card, so they can decide not to make a guess
@@ -312,6 +341,7 @@ async fn player_move(
                 "yes" => {
                     // continue with this logic
                     yes_variant_guess(
+                        terminal,
                         stream,
                         player_name.to_string(),
                         the_game,
@@ -321,7 +351,9 @@ async fn player_move(
                 }
                 "no" => {
                     dialog_status = 1;
-                    println!("Nah, exit");
+                    the_game.logs.push_str("Nah, exit\n");
+                    let _ = update_ui(terminal, the_game).await;
+                    // println!("Nah, exit");
                 }
                 _ => {}
             }
@@ -330,6 +362,7 @@ async fn player_move(
             // no more cards to draw, meaning that the only way to play is to make a guess. No
             // more choice. So spawn the yes_variant_guess.
             yes_variant_guess(
+                terminal,
                 stream,
                 player_name.to_string(),
                 the_game,
@@ -352,21 +385,27 @@ async fn player_move(
 
             let mut to_send = format!("Okay, saving your side card as hidden.\n",);
 
-            to_send.push_str(format!("\n{}", "Your new deck: ".green()).as_str());
+            to_send.push_str(format!("{}", "Your new deck: ##").as_str());
             for p in the_game.players.iter() {
                 if p.name == player_name.clone() {
-                    to_send.push_str(&p.show_hand(false));
+                    to_send.push_str(&p.show_hand(false, false));
                 }
             }
-            to_send.push_str(format!("\n{}", "What your opponents see:".yellow()).as_str());
+            to_send.push_str("##");
+            if send_something(stream, &to_send).await {
+                return 1;
+            }
+
+            to_send.clear();
+            to_send.push_str(format!("\n{}", "What your opponents see:").as_str());
             to_send.push_str("");
             for p in the_game.players.iter() {
                 if p.name == player_name.clone() {
-                    to_send.push_str(&p.show_hand(true));
+                    to_send.push_str(&p.show_hand(true, false));
                 }
             }
             if send_something(stream, &to_send).await {
-                return;
+                return 1;
             }
         }
         2 => {
@@ -380,52 +419,58 @@ async fn player_move(
             let mut to_send = String::new();
 
             to_send.push_str(
-                format!(
-                    "\n{}\n",
-                    "You made a wrong guess, I'm revealing your card.".red()
-                )
-                .as_str(),
+                format!("\n{}\n", "You made a wrong guess, I'm revealing your card.").as_str(),
             );
 
-            to_send.push_str(format!("{}", "Your new deck: ".green()).as_str());
-
+            to_send.push_str(format!("{}", "Your new deck: ##").as_str());
             for p in the_game.players.iter() {
                 if p.name == player_name.clone() {
-                    to_send.push_str(&p.show_hand(false));
+                    to_send.push_str(&p.show_hand(false, false));
                 }
             }
-            to_send.push_str(format!("{}", "What your opponents see: ".yellow()).as_str());
+            to_send.push_str("##");
+            if send_something(stream, &to_send).await {
+                return 1;
+            }
+
+            to_send.push_str(format!("{}", "What your opponents see: ").as_str());
 
             for p in the_game.players.iter() {
                 if p.name == player_name.clone() {
-                    to_send.push_str(&p.show_hand(true));
+                    to_send.push_str(&p.show_hand(true, false));
                 }
             }
 
             if send_something(stream, &to_send).await {
-                return;
+                return 1;
             }
         }
         GAME_END_CODE => {
             // game ended
-            println!("We got a winner: {:?}\n", the_game.winner);
             // announce this to the remaining player
-            let to_send = format!("{}", "You won! Congrats!".green(),);
+            let to_send = format!("{}", "You won! Congrats!",);
             if send_something(stream, &to_send).await {
-                return;
+                return 1;
             }
 
-            return;
+            the_game
+                .logs
+                .push_str(format!("We got a winner: {:?}\n", the_game.winner).as_str());
+            let _ = update_ui(terminal, the_game).await;
+            // println!("We got a winner: {:?}\n", the_game.winner);
+
+            return 0;
         }
         _ => {
             // what??
         }
     }
-
+    return 2;
     //
 }
 
-async fn guess_opponent_card_loop(
+async fn guess_opponent_card_loop<B: Backend>(
+    terminal: &mut Terminal<B>,
     stream: &mut TcpStream,
     the_game: &mut davincicode::Game,
     opponents_names: Vec<String>,
@@ -440,13 +485,12 @@ async fn guess_opponent_card_loop(
 
     loop {
         if opponents_names.len() == 1 {
-            // no need to ask to chose the opponent since only 1
             skip_chose_op = true;
         }
 
         // show opponents deck so the player can decice which one to guess
         let mut to_send = String::new();
-        to_send.push_str(format!("\n{}", "Your opponents deck: ".yellow()).as_str());
+        to_send.push_str(format!("\n{}", "Your opponents deck: ").as_str());
 
         for (idx, a_player) in the_game.players.iter().enumerate() {
             if a_player.name == player_name.clone() {
@@ -456,8 +500,8 @@ async fn guess_opponent_card_loop(
                 format!(
                     "{}: {} => {}",
                     idx,
-                    (&a_player.name).yellow(),
-                    (&a_player.show_hand(true)).yellow() // opponent view = true
+                    (&a_player.name),
+                    (&a_player.show_hand(true, false)) // opponent view = true
                 )
                 .as_str(),
             );
@@ -481,40 +525,49 @@ async fn guess_opponent_card_loop(
 
         let opponent_name_ = String::from(opponents_names.get(op_idx as usize).unwrap()); //.unwrap());
 
-        let mut to_send = format!(
-            "{} {} {}",
-            "The chosen opponent name is:",
-            opponent_name_,
-            "\nTheir deck: ".yellow(),
-        );
-        println!(
-            "{} {}",
-            "The chosen opponent name is:".yellow(),
-            opponent_name_
-        );
+        let to_send = format!("{} {}", "The chosen opponent name is:", opponent_name_,);
+        if send_something(stream, &to_send).await {
+            return -2;
+        }
+
+        the_game
+            .logs
+            .push_str(format!("{} {}\n", "The chosen opponent name is:", opponent_name_).as_str());
+        let _ = update_ui(terminal, the_game).await;
 
         // show this current opponent deck
+        let mut to_send = format!("{}", "Their deck: ++",);
         for opponent in the_game.players.iter() {
             if opponent.name == opponent_name_ {
-                to_send.push_str(&opponent.show_hand(true));
+                to_send.push_str(&opponent.show_hand(true, false));
                 opponent_deck_len = opponent.deck.len() as u32;
             }
         }
-        // add also the current player's deck (since cards are only in 2 models 2 card of value
-        // 5, 1 black and 1 white), knowing your current deck also helps
-        to_send.push_str(format!("\n{}", "Your current deck: ".green()).as_str());
+        to_send.push_str("++");
+        if send_something(stream, &to_send).await {
+            return -2;
+        }
+
+        to_send.clear();
+        to_send.push_str(format!("\n{}", "Your current deck: ##").as_str());
         for p in the_game.players.iter() {
             if p.name != opponent_name_ {
                 // so it gotta be the current player
-                to_send.push_str(&p.show_hand(false));
+                to_send.push_str(&p.show_hand(false, false));
             }
         }
-        to_send.push_str(format!("{}", "What your opponents see: ".yellow()).as_str());
+        to_send.push_str("##");
+        if send_something(stream, &to_send).await {
+            return -2;
+        }
+
+        to_send.clear();
+        to_send.push_str(format!("{}", "What your opponents see: ").as_str());
         to_send.push_str("");
         for p in the_game.players.iter() {
             if p.name != opponent_name_ {
                 // so it gotta be the current player
-                to_send.push_str(&p.show_hand(true));
+                to_send.push_str(&p.show_hand(true, false));
             }
         }
 
@@ -532,7 +585,11 @@ async fn guess_opponent_card_loop(
         .expect("Got no response");
 
         picked_card_number = value as usize;
-        println!("{} {}\n", "Picked card number:".blue(), picked_card_number);
+
+        the_game
+            .logs
+            .push_str(format!("\n{} {}\n", "Picked card number:", picked_card_number).as_str());
+        let _ = update_ui(terminal, the_game).await;
 
         // only 1 opponent, read their specific card value
         for opponent in the_game.players.iter() {
@@ -560,17 +617,17 @@ async fn guess_opponent_card_loop(
         // evaluate the guess
         if golden_value == guessed_value {
             correct_guess = true;
-            println!("{}\n", "Good guess!".green());
+            the_game
+                .logs
+                .push_str(format!("{}\n", "Good guess!").as_str());
+            let _ = update_ui(terminal, the_game).await;
+
             // ack correct guess
             let mut to_send = String::new();
-            to_send.push_str(
-                format!(
-                    "{}",
-                    "You got it right! Guessed card revealed. \nHere's the new opponent deck "
-                        .green()
-                )
-                .as_str(),
-            );
+            to_send.push_str(format!("{}", "You got it right! Guessed card revealed\n").as_str());
+            if send_something(stream, &to_send).await {
+                return -2;
+            }
 
             // mutate the opponent card to revealed
             for opponent in the_game.players.iter_mut() {
@@ -580,12 +637,15 @@ async fn guess_opponent_card_loop(
                 }
             }
 
+            let mut to_send = String::new();
+            to_send.push_str("Here's the new opponent deck: ++");
             // show the player the new opponent deck
             for opponent in the_game.players.iter() {
                 if opponent.name == opponent_name_ {
-                    to_send.push_str(&opponent.show_hand(true));
+                    to_send.push_str(&opponent.show_hand(true, false));
                 }
             }
+            to_send.push_str("++");
             if send_something(stream, &to_send).await {
                 return -2;
             }
@@ -602,12 +662,12 @@ async fn guess_opponent_card_loop(
     return 0;
 }
 
-async fn game_process(
+async fn game_process<B: Backend>(
+    terminal: &mut Terminal<B>,
     the_game: &mut davincicode::Game,
     selected_player_name: String,
     player_tcp_name: &mut HashMap<String, TcpStream>,
 ) -> i32 {
-    // turn taking thingy
     let mut player_order: Vec<String> = Vec::new();
     let mut current_player = selected_player_name.clone();
 
@@ -616,7 +676,6 @@ async fn game_process(
 
     loop {
         if the_game.game_status() == true {
-            // game end
             break;
         }
         // report to lost players
@@ -657,11 +716,16 @@ async fn game_process(
                 // the current player has been dropped cause they lost
                 continue;
             }
-            player_move(player.to_string(), player_tcp_name, the_game).await;
+            if player_move(terminal, player.to_string(), player_tcp_name, the_game).await == 0 {
+                break;
+            }
         }
     }
 
-    println!("left game_process");
+    the_game
+        .logs
+        .push_str(format!("{}\n", "left game_process").as_str());
+    let _ = update_ui(terminal, the_game).await;
 
     return 0;
 }
@@ -670,54 +734,184 @@ async fn game_run(
     player_names: HashMap<u32, String>,
     selected_player_name: String,
     player_tcp_name: &mut HashMap<String, TcpStream>,
-) {
-    // create the game object here
+) -> Result<(), Box<dyn Error>> {
     let mut the_game = davincicode::Game::new(START_CARD_N);
 
     for player in player_names.iter() {
         let p = davincicode::Player::new(String::from(player.1), CARD_PER_PLAYER);
         the_game.players.push(p);
     }
-    // set and players init
     the_game.init_set();
 
-    // send each player their own view of their deck
-    for (name, client_stream) in player_tcp_name.iter_mut() {
-        let mut to_send = String::new();
-        to_send.push_str(format!("{}", "\nYour deck ".green()).as_str());
+    ///////////////////////////////////////////////////////////////////////////////////
+    // setup terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
-        let current_player = the_game
-            .players
-            .iter()
-            .find(|player| player.name == name.to_string())
-            .expect("No player found\n");
+    let res = run_app(
+        &mut terminal,
+        &mut the_game,
+        selected_player_name,
+        player_tcp_name,
+    )
+    .await;
 
-        to_send.push_str(&current_player.show_hand(false));
+    // restore terminal
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
 
-        if send_something(client_stream, &to_send).await {
-            return;
+    if let Err(err) = res {
+        println!("{err:?}");
+    }
+    println!("exit successfully");
+
+    return Ok(());
+}
+
+fn ui2(f: &mut Frame, the_game: &davincicode::Game) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(f.size());
+
+    let inner_layout = Layout::new(
+        Direction::Vertical,
+        [Constraint::Percentage(50), Constraint::Percentage(50)],
+    )
+    .split(chunks[0]);
+
+    let players: Vec<ListItem> = the_game
+        .players
+        .iter()
+        .rev()
+        .map(|player| {
+            let header = ratatui::prelude::Line::from(vec![Span::styled(
+                format!("{}", player.name),
+                ratatui::prelude::Style::default(),
+            )]);
+
+            ListItem::new(vec![
+                ratatui::prelude::Line::from("-".repeat(chunks[1].width as usize)),
+                header,
+                ratatui::prelude::Line::from(""),
+            ])
+        })
+        .collect();
+
+    let players_list = List::new(players)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Current players"),
+        )
+        .direction(ListDirection::BottomToTop);
+    f.render_widget(players_list, inner_layout[0] /*chunks[0]*/);
+
+    // Logs Paragraph
+    let logs = ratatui::prelude::Text::from(the_game.logs.clone());
+    let log_p = Paragraph::new(logs)
+        .block(Block::new().title("Logs").borders(Borders::ALL))
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+
+    f.render_widget(log_p, chunks[1]);
+
+    /*
+    let avail_cards_set: Vec<ListItem> = the_game
+        .card_avail
+        .iter()
+        .rev()
+        .map(|card| {
+            let s = match card.color {
+                davincicode::Color::BLACK => {
+                    ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Blue)
+                }
+                davincicode::Color::WHITE => {
+                    ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Yellow)
+                }
+            };
+
+            let header =
+                ratatui::prelude::Line::from(vec![Span::styled(format!("{}", card.value), s)]);
+            ListItem::new(vec![
+                ratatui::prelude::Line::from("-".repeat(inner_layout[1].width as usize)),
+                header,
+            ])
+        })
+        .collect();
+
+    let card_len = avail_cards_set.len();
+    let card_set_list = List::new(avail_cards_set)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!("Cards available {card_len}")),
+        )
+        .direction(ListDirection::BottomToTop);
+    f.render_widget(card_set_list, inner_layout[1]);*/
+
+    let card_grid_layout = Layout::new(
+        Direction::Horizontal,
+        [
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+        ],
+    )
+    .split(inner_layout[1]);
+
+    let mut idx_ = 0;
+    for (chunk_id, _) in card_grid_layout.iter().enumerate() {
+        // for each layout, /4
+        let sub_inner_layout = Layout::new(
+            Direction::Vertical,
+            [
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+                Constraint::Percentage(25),
+            ],
+        )
+        .split(card_grid_layout[chunk_id]);
+
+        for (chunk, _) in sub_inner_layout.iter().enumerate() {
+            if let Some(card_item) = the_game.card_avail.get(idx_) {
+                idx_ += 1;
+                let s = match card_item.color {
+                    davincicode::Color::BLACK => {
+                        ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Blue)
+                    }
+                    davincicode::Color::WHITE => {
+                        ratatui::prelude::Style::default().fg(ratatui::prelude::Color::Yellow)
+                    }
+                };
+
+                let card_color = match card_item.color {
+                    davincicode::Color::BLACK => "B",
+                    davincicode::Color::WHITE => "W",
+                };
+
+                let card_p = Paragraph::new(Span::styled(
+                    format!("{} {}", card_color, card_item.value),
+                    s,
+                ))
+                .block(Block::new().title("card").borders(Borders::ALL))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+
+                f.render_widget(card_p, sub_inner_layout[chunk]);
+            }
         }
     }
-    // println!("{:?}\n", the_game.players);
-
-    // at each turn, show each others card
-    let mut ret = String::new();
-    broadcast_msg(player_tcp_name, "\n").await;
-
-    ret.push_str("\n");
-    for player in the_game.players.iter() {
-        ret.push_str(&player.name);
-        ret.push_str("'s cards: ");
-        ret.push_str(&player.show_hand(true));
-    }
-
-    broadcast_msg(player_tcp_name, &ret).await;
-
-    // process cmd of all clients
-    game_process(&mut the_game, selected_player_name.clone(), player_tcp_name).await;
-    println!("{}", "Game over".green());
-
-    return;
 }
 
 async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
@@ -728,7 +922,7 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
         return;
     }
 
-    let mut player_names: HashMap<u32, String> = HashMap::new(); // map to store player names and their TCP stream id
+    let mut player_names: HashMap<u32, String> = HashMap::new();
     let mut player_tcp_name: HashMap<String, TcpStream> = HashMap::new();
 
     // rq to clients to identify themselves
@@ -737,12 +931,9 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
 
         let name = request.trim().to_string();
         player_names.insert(index as u32, name.clone());
-        // println!("Player {} identified as {}", &index, &name);
     }
 
-    // create a vector of reversed indices
     let indices: Vec<usize> = (0..player_names.len()).rev().collect();
-
     for idx in indices {
         let name = player_names.get(&(idx as u32)).unwrap();
         let tcp_stream = streams.remove(idx);
@@ -751,11 +942,8 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
 
     println!("Players {:?}", player_tcp_name);
 
-    // generate a random index within the range of the HashMap's size
     let mut rng = rand::thread_rng();
     let selected_player_index = rng.gen_range(0..player_tcp_name.len());
-
-    // get the stream
     let some_player_name = player_tcp_name
         .keys()
         .nth(selected_player_index)
@@ -769,7 +957,7 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
     println!("Picked {:?} as the first to move.\n", some_player_stream);
 
     let mut to_send = String::new();
-    to_send.push_str(format!("{}\n", "It's your turn, move".green()).as_str());
+    to_send.push_str(format!("{}\n", "It's your turn, move").as_str());
     if send_something(some_player_stream, &to_send).await {
         return;
     }
@@ -781,20 +969,19 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
         }
         if send_something(
             client_stream,
-            &format!("{} {}", "Wait for your turn,".yellow(), name),
+            &format!("{} {}{}", "Wait for your turn, ", name, "\n"),
         )
         .await
         {
             continue;
         }
     }
-    game_run(
+    let _ = game_run(
         player_names.clone(),
         selected_player_name,
         &mut player_tcp_name,
     )
     .await;
-    // ends here if this breaks.
 }
 
 async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
@@ -805,7 +992,6 @@ async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<Tc
     let mut init_player: bool = false;
 
     loop {
-        // read client's data
         buffer.fill(0);
         let bytes_read = match stream.read(&mut buffer).await {
             Ok(bytes_read) => bytes_read,
@@ -848,14 +1034,12 @@ async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<Tc
     }
 
     if init_player == false {
-        // del the client stream from the vector, maybe disco or something
         streams.remove(*client_id as usize);
         *client_id -= 1;
     }
 }
 
 async fn broadcast_msg(player_tcp_name: &mut HashMap<String, TcpStream>, cmd: &str) {
-    // send wait message to all players
     for client_stream in player_tcp_name.values_mut() {
         if send_something(client_stream, &format!("{}", cmd)).await {
             continue;
@@ -879,7 +1063,6 @@ async fn send_something(some_player: &mut TcpStream, cmd: &str) -> bool {
 }
 
 async fn recv_something(stream: &mut TcpStream) -> String {
-    // read something from the current player
     let mut buffer = [0; 1024];
 
     let bytes_read = stream
@@ -893,20 +1076,20 @@ async fn recv_something(stream: &mut TcpStream) -> String {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
     let address = format!("{}:{}", args.addr, args.port);
+    let required_clients = args.nplayers;
 
     let listener = TcpListener::bind(address.clone()).await.unwrap();
     println!("{} {}", "Server listening on".green(), address);
 
     let client_streams_vec = Arc::new(Mutex::new(Vec::new()));
     let client_counter = Arc::new(Semaphore::new(0));
-    let mut client_handles = Vec::new(); // Store JoinHandles for client tasks
+    let mut client_handles = Vec::new();
 
     let mut client_id = 0;
-    let required_clients = 2;
 
     while let Ok((stream, _)) = listener.accept().await {
         client_streams_vec.lock().await.push(stream);
@@ -923,8 +1106,7 @@ async fn main() {
         client_id += 1;
         println!("{} {}", "current clients:".blue(), client_id);
 
-        if client_id >= required_clients {
-            // join all client
+        if client_id >= required_clients as u32 {
             for handle in client_handles {
                 handle.await.unwrap();
             }
@@ -938,5 +1120,95 @@ async fn main() {
             init_players(Arc::clone(&client_streams_vec)).await;
             break;
         }
+    }
+
+    Ok(())
+}
+
+async fn update_ui<B: Backend>(
+    terminal: &mut Terminal<B>,
+    the_game: &davincicode::Game,
+) -> Result<(), std::io::Error> {
+    terminal.draw(|f| ui2(f, the_game))?;
+    Ok(())
+}
+
+/*async fn event_task() -> Result<(), std::io::Error> {
+    loop {
+        if let Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Char('q') => {
+                    panic!("lol");
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+}*/
+
+async fn run_app<B: Backend>(
+    terminal: &mut Terminal<B>,
+    the_game: &mut davincicode::Game,
+    selected_player_name: String,
+    player_tcp_name: &mut HashMap<String, TcpStream>,
+) -> Result<(), std::io::Error> {
+    the_game
+        .logs
+        .push_str(format!("{}\n", "Game started").as_str());
+    let _ = update_ui(terminal, the_game).await;
+
+    loop {
+        let _ = update_ui(terminal, &the_game).await;
+
+        // send each player their own view of their deck
+        for (name, client_stream) in player_tcp_name.iter_mut() {
+            let mut to_send = String::new();
+            to_send.push_str(format!("{}", "Your deck ##").as_str());
+
+            let current_player = the_game
+                .players
+                .iter()
+                .find(|player| player.name == name.to_string())
+                .expect("No player found\n");
+
+            to_send.push_str(&current_player.show_hand(false, false));
+            to_send.push_str("##");
+
+            if send_something(client_stream, &to_send).await {
+                return Ok(());
+            }
+        }
+
+        // at each turn, show each others card
+        let mut ret = String::new();
+        broadcast_msg(player_tcp_name, "\n").await;
+
+        ret.push_str("\n");
+        for player in the_game.players.iter() {
+            ret.push_str(&player.name);
+            ret.push_str("'s cards: ");
+            ret.push_str(&player.show_hand(true, false));
+        }
+
+        broadcast_msg(player_tcp_name, &ret).await;
+
+        // process cmd of all clients
+        game_process(
+            terminal,
+            the_game,
+            selected_player_name.clone(),
+            player_tcp_name,
+        )
+        .await;
+        println!("{}", "\n\nGame over\n\n".green());
+
+        let mut ret = String::new();
+        ret.push_str(format!("||{}|| {}", the_game.players[0].name, " won. __exiting__.").as_str());
+        broadcast_msg(player_tcp_name, &ret).await;
+
+        sleep(Duration::from_secs(15)).await;
+
+        return Ok(());
     }
 }

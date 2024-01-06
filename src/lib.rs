@@ -1,6 +1,6 @@
 use colored::Colorize;
 use rand::{seq::SliceRandom, Rng};
-use std::cmp::Ordering;
+use std::{cmp::Ordering, u32};
 
 #[derive(Debug)]
 pub struct Game {
@@ -10,6 +10,8 @@ pub struct Game {
     pub winner: Option<Player>,
     pub card_avail: Vec<Card>,
     pub set_cards: u32,
+    pub logs: String,
+    pub err: String,
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -69,6 +71,8 @@ impl Game {
             winner: None,
             card_avail: empty_cards,
             set_cards: set_number,
+            logs: String::from(""),
+            err: String::from(""),
         }
     }
 
@@ -115,7 +119,7 @@ impl Game {
         self.card_avail.shuffle(&mut rng);
     }
 
-    pub fn show_avail_cards(&self, hide_values: bool) -> String {
+    pub fn show_avail_cards(&self, hide_values: bool, colorize: bool) -> String {
         let mut game_set = String::new();
 
         for (elm_number, card) in self.card_avail.iter().enumerate() {
@@ -124,38 +128,76 @@ impl Game {
 
             match card.color {
                 Color::BLACK => {
-                    game_set.push_str(format!("{}", "B".blue()).as_str());
+                    if colorize {
+                        game_set.push_str(format!("{}", "B".blue()).as_str());
+                    } else {
+                        game_set.push_str(format!("{}", "B").as_str());
+                    }
+
                     if hide_values == true {
                         match card.status {
                             CardStatus::HIDDEN => {
-                                game_set.push_str(format!("{}", "?".blue()).as_str());
+                                if colorize {
+                                    game_set.push_str(format!("{}", "?".blue()).as_str());
+                                } else {
+                                    game_set.push_str(format!("{}", "?").as_str());
+                                }
                             }
                             CardStatus::REVEALED => {
-                                game_set.push_str(
-                                    format!("{}", &card.value.to_string().blue()).as_str(),
-                                );
+                                if colorize {
+                                    game_set.push_str(
+                                        format!("{}", &card.value.to_string().blue()).as_str(),
+                                    );
+                                } else {
+                                    game_set
+                                        .push_str(format!("{}", &card.value.to_string()).as_str());
+                                }
                             }
                         };
                     } else {
-                        game_set.push_str(format!("{}", &card.value.to_string().blue()).as_str());
+                        if colorize {
+                            game_set
+                                .push_str(format!("{}", &card.value.to_string().blue()).as_str());
+                        } else {
+                            game_set.push_str(format!("{}", &card.value.to_string()).as_str());
+                        }
                     }
                 }
 
                 Color::WHITE => {
-                    game_set.push_str(format!("{}", "W".yellow()).as_str());
+                    if colorize {
+                        game_set.push_str(format!("{}", "W".yellow()).as_str());
+                    } else {
+                        game_set.push_str(format!("{}", "W").as_str());
+                    }
+
                     if hide_values == true {
                         match card.status {
                             CardStatus::HIDDEN => {
-                                game_set.push_str(format!("{}", "?".yellow()).as_str());
+                                if colorize {
+                                    game_set.push_str(format!("{}", "?".yellow()).as_str());
+                                } else {
+                                    game_set.push_str(format!("{}", "?").as_str());
+                                }
                             }
                             CardStatus::REVEALED => {
-                                game_set.push_str(
-                                    format!("{}", &card.value.to_string().yellow()).as_str(),
-                                );
+                                if colorize {
+                                    game_set.push_str(
+                                        format!("{}", &card.value.to_string().yellow()).as_str(),
+                                    );
+                                } else {
+                                    game_set
+                                        .push_str(format!("{}", &card.value.to_string()).as_str());
+                                }
                             }
                         };
                     } else {
-                        game_set.push_str(format!("{}", &card.value.to_string().yellow()).as_str());
+                        if colorize {
+                            game_set
+                                .push_str(format!("{}", &card.value.to_string().yellow()).as_str());
+                        } else {
+                            game_set.push_str(format!("{}", &card.value.to_string()).as_str());
+                        }
                     }
                 }
             };
@@ -168,6 +210,8 @@ impl Game {
     }
 
     pub fn game_status(&mut self) -> bool {
+        let mut to_remove: Vec<Player> = Vec::new();
+
         // check players to see if any has all the cards revealed
         for player in self.players.iter_mut() {
             // a given player: iterate through their deck
@@ -186,19 +230,20 @@ impl Game {
                 // player lost as all cards revealed
                 player.status = PlayerStatus::LOST;
                 self.lost_players.push(player.clone());
+                to_remove.push(player.clone());
             }
         }
 
         // TODO: use retain
         // remove the players that lost from the vector
-        for lost_player in self.lost_players.iter() {
+        for lost_player in to_remove.iter() {
             // println!("Removing {}\n", lost_player.name);
 
             let idx = self
                 .players
                 .iter_mut()
                 .position(|player| player == lost_player)
-                .unwrap();
+                .expect("didn't find any?");
             self.players.remove(idx);
         }
 
@@ -261,6 +306,36 @@ impl Player {
         Some(picked_card.value)
     }
 
+    pub fn deck_from_str(&mut self, deck_str: String) {
+        //str_deck.push_str("0: W1, 1: B1, 2: W13, 3: B2");
+        let card_items = deck_str.split(",");
+        self.deck = Vec::new(); // reset current deck
+
+        for card in card_items {
+            let card: Vec<_> = card.split(":").collect();
+            if let Some(card) = card.get(1) {
+                if let Some(card_color) = card.get(0..2) {
+                    if let Some(card_value) = card.get(2..) {
+                        // println!("{} : {} => {}", card, card_color, card_value);
+                        let card_color = match card_color.trim() {
+                            "B" => Color::BLACK,
+                            "W" => Color::WHITE,
+                            _ => Color::BLACK,
+                        };
+
+                        match card_value.parse::<u32>() {
+                            Ok(value) => {
+                                let a_card = Card::new(value, card_color);
+                                self.deck.push(a_card);
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     pub fn draw_specific_card(&mut self, avail_card: &mut Vec<Card>, card_number: usize) -> Card {
         let picked_card = avail_card[card_number];
 
@@ -271,7 +346,7 @@ impl Player {
             .unwrap();
         avail_card.remove(idx);
 
-        println!("Your picked {:?}, Setting it as side card.\n", picked_card);
+        // println!("Your picked {:?}, Setting it as side card.\n", picked_card);
 
         // set it as side card
         self.side_card = Some(picked_card);
@@ -334,7 +409,7 @@ impl Player {
         self.sort_deck();
     }
 
-    pub fn show_hand(&self, opponent_view: bool) -> String {
+    pub fn show_hand(&self, opponent_view: bool, colorize: bool) -> String {
         let mut hand = String::new();
 
         for (elm_number, card) in self.deck.iter().enumerate() {
@@ -343,38 +418,71 @@ impl Player {
 
             match card.color {
                 Color::BLACK => {
-                    hand.push_str(format!("{}", "B".blue()).as_str());
+                    if colorize {
+                        hand.push_str(format!("{}", "B".blue()).as_str());
+                    } else {
+                        hand.push_str(format!("{}", "B").as_str());
+                    }
                     if opponent_view == true {
                         match card.status {
                             CardStatus::HIDDEN => {
-                                hand.push_str(format!("{}", "?".blue()).as_str());
+                                if colorize {
+                                    hand.push_str(format!("{}", "?".blue()).as_str());
+                                } else {
+                                    hand.push_str(format!("{}", "?").as_str());
+                                }
                             }
                             CardStatus::REVEALED => {
-                                hand.push_str(
-                                    format!("{}", &card.value.to_string().blue()).as_str(),
-                                );
+                                if colorize {
+                                    hand.push_str(
+                                        format!("{}", &card.value.to_string().blue()).as_str(),
+                                    );
+                                } else {
+                                    hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                                }
                             }
                         };
                     } else {
-                        hand.push_str(format!("{}", &card.value.to_string().blue()).as_str());
+                        if colorize {
+                            hand.push_str(format!("{}", &card.value.to_string().blue()).as_str());
+                        } else {
+                            hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                        }
                     }
                 }
 
                 Color::WHITE => {
-                    hand.push_str(format!("{}", "W".yellow()).as_str());
+                    if colorize {
+                        hand.push_str(format!("{}", "W".yellow()).as_str());
+                    } else {
+                        hand.push_str(format!("{}", "W").as_str());
+                    }
+
                     if opponent_view == true {
                         match card.status {
                             CardStatus::HIDDEN => {
-                                hand.push_str(format!("{}", "?".yellow()).as_str());
+                                if colorize {
+                                    hand.push_str(format!("{}", "?".yellow()).as_str());
+                                } else {
+                                    hand.push_str(format!("{}", "?").as_str());
+                                }
                             }
                             CardStatus::REVEALED => {
-                                hand.push_str(
-                                    format!("{}", &card.value.to_string().yellow()).as_str(),
-                                );
+                                if colorize {
+                                    hand.push_str(
+                                        format!("{}", &card.value.to_string().yellow()).as_str(),
+                                    );
+                                } else {
+                                    hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                                }
                             }
                         };
                     } else {
-                        hand.push_str(format!("{}", &card.value.to_string().yellow()).as_str());
+                        if colorize {
+                            hand.push_str(format!("{}", &card.value.to_string().yellow()).as_str());
+                        } else {
+                            hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                        }
                     }
                 }
             };
@@ -462,6 +570,25 @@ mod tests {
         game.players.push(p2);
 
         game.init_set();
+    }
+
+    #[test]
+    fn test_deck_from_str() {
+        let mut p1 = Player::new(String::from("me"), 4);
+        let mut str_deck = String::new();
+
+        str_deck.push_str("0: W1, 1: B1, 2: W13, 3: B2");
+
+        let c1 = Card::new(1, crate::Color::WHITE);
+        let c2 = Card::new(1, crate::Color::BLACK);
+        let c3 = Card::new(13, crate::Color::WHITE);
+        let c4 = Card::new(2, crate::Color::BLACK);
+
+        p1.deck_from_str(str_deck);
+
+        let expected_deck: Vec<Card> = vec![c1, c2, c3, c4];
+
+        assert_eq!(p1.deck, expected_deck);
     }
 
     #[test]
