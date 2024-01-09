@@ -1,6 +1,7 @@
 use colored::Colorize;
 use rand::Rng;
 use std::collections::HashMap;
+use std::process;
 use std::sync::Arc;
 use std::{error::Error, io};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,8 +9,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::{sleep, Duration};
 
+use crossterm::event::poll;
+use crossterm::event::Event::Key;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{self, DisableMouseCapture, EnableMouseCapture, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -62,7 +65,7 @@ async fn loop_read_uint(stream: &mut TcpStream, msg: String, range: Vec<u32>) ->
             return None;
         }
 
-        let response = recv_something(stream).await;
+        let response = recv_something(stream).await?;
         let parsed_response = response.parse::<u32>();
 
         match parsed_response {
@@ -100,7 +103,7 @@ async fn loop_read_str(
             return None;
         }
 
-        let response = recv_something(stream).await;
+        let response = recv_something(stream).await?;
         match response.trim() {
             value => {
                 if value == v0 || value == v1 {
@@ -927,7 +930,7 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
 
     // rq to clients to identify themselves
     for (index, client_stream) in streams.iter_mut().enumerate() {
-        let request = recv_something(client_stream).await;
+        let request = recv_something(client_stream).await.unwrap();
 
         let name = request.trim().to_string();
         player_names.insert(index as u32, name.clone());
@@ -1062,17 +1065,28 @@ async fn send_something(some_player: &mut TcpStream, cmd: &str) -> bool {
     ret
 }
 
-async fn recv_something(stream: &mut TcpStream) -> String {
+async fn recv_something(stream: &mut TcpStream) -> Option<String> {
     let mut buffer = [0; 1024];
 
-    let bytes_read = stream
-        .read(&mut buffer)
-        .await
-        .expect("Cannot read from client\n");
+    let response_received = Mutex::new(false);
 
-    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    loop {
+        tokio::select! {
+            bytes_read = stream.read(&mut buffer) => {
 
-    request.to_string()
+                let bytes_read = bytes_read.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+
+                return Some(request.to_string());
+            }
+            _ = event_task(&response_received) => {
+                let flag = *response_received.lock().await;
+                if flag {
+                    break None;
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]
@@ -1133,19 +1147,45 @@ async fn update_ui<B: Backend>(
     Ok(())
 }
 
-/*async fn event_task() -> Result<(), std::io::Error> {
+async fn event_task(response_received: &Mutex<bool>) -> Result<(), std::io::Error> {
     loop {
-        if let Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Char('q') => {
-                    panic!("lol");
+        if poll(Duration::from_millis(500))? {
+            if let Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') => {
+                        let mut stdout = io::stdout();
+                        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+                        let _ = disable_raw_mode();
+                        let backend = CrosstermBackend::new(stdout);
+                        let mut terminal = Terminal::new(backend)?;
+
+                        // restore terminal
+                        disable_raw_mode()?;
+                        execute!(
+                            terminal.backend_mut(),
+                            LeaveAlternateScreen,
+                            DisableMouseCapture
+                        )?;
+                        terminal.show_cursor()?;
+                        println!("exiting.");
+
+                        process::exit(0);
+                    }
+                    _ => {
+                        let mut flag = response_received.lock().await;
+                        *flag = true;
+                        break;
+                    }
                 }
-                _ => {}
             }
+        } else {
+            break;
         }
-        return Ok(());
     }
-}*/
+
+    Ok(())
+}
 
 async fn run_app<B: Backend>(
     terminal: &mut Terminal<B>,

@@ -10,6 +10,13 @@ Play it with your friends over the internet.
 
 `cargo run --bin client -- --name [UNAME] --addr [IP_ADDR] --port [PORT]` for the clients
 
+#### Tips
+`q` => `exit` for the server and the client
+
+`i` => `Input mode` for the client
+
+`Esc` => `Normal mode` for the client
+
 ### Run cli
 `cargo run --bin server-cli -- --addr [IP_ADDR] --port [PORT]` for the server
 
