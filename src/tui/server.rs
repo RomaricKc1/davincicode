@@ -1149,7 +1149,7 @@ async fn update_ui<B: Backend>(
 
 async fn event_task(response_received: &Mutex<bool>) -> Result<(), std::io::Error> {
     loop {
-        if poll(Duration::from_millis(500))? {
+        if poll(Duration::from_millis(80))? {
             if let Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => {
