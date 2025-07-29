@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+  workflow_dispatch:
+
+env:
+ANY: 1
+
+jobs:
+  build_test:
+    name: "Main build and test using -> '${{ matrix.BUILD }}'"
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        RUST_VER: [stable]
+        BUILD: ["", "--release"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          component: clippy, rustfmt
+          toolchain: ${{ matrix.RUST_VER }}
+
+      - name: Build now
+        run: cargo build ${{ BUILD }}
+
+      - name: Test it
+        run: cargo test
+
+      - name: check bin size
+        run: ls target/{debug,release}/{client,server,client-cli,server-cli}
+
+  fmt:
+    name: Check the formatting
+    runs-on: ubuntu-24.04
+    needs: build_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          component: clippy, rustfmt
+          toolchain: ${{ matrix.RUST_VER }}
+
+      - name: Check the formatting
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy check
+    runs-on: ubuntu-24.04
+    needs: build_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          component: clippy, rustfmt
+          toolchain: ${{ matrix.RUST_VER }}
+
+      - name: Clippy
+        run: cargo clippy
