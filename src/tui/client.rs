@@ -30,11 +30,11 @@ struct Args {
     name: String,
 
     /// Server address
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
     addr: String,
 
     /// Server port
-    #[arg(short, long)]
+    #[arg(short, long, default_value_t = String::from("8079"))]
     port: String,
 }
 
@@ -54,6 +54,8 @@ pub struct App {
     pub opp_deck: Vec<davincicode::Card>,
     pub log_scroll: u16,
 }
+
+const MAX_SCROLL: u16 = 65535;
 
 impl App {
     pub fn new(name: String, ncards: u32) -> App {
@@ -81,7 +83,7 @@ impl App {
     }
 
     pub fn log_scroll_next(&mut self) {
-        if self.log_scroll <= u16::MAX {
+        if self.log_scroll < MAX_SCROLL - 1 {
             self.log_scroll += 1;
             self.log_scroll %= 10;
         }
@@ -163,8 +165,9 @@ async fn run_app<B: Backend>(
     _name: String,
 ) -> Result<(), std::io::Error> {
     let mut awaiting_msg_transfer: bool = false;
+
     loop {
-        let _ = update_ui(terminal, &app).await;
+        let _ = update_ui(terminal, app).await;
         let mut buffer = [0u8; 1024];
 
         if poll(Duration::from_millis(500))? {
@@ -221,60 +224,55 @@ async fn run_app<B: Backend>(
             let read_timeout =
                 time::timeout(Duration::from_millis(200), stream.read(&mut buffer)).await;
 
-            match read_timeout {
-                Ok(value) => {
-                    let bytes_read = value.unwrap();
-                    let response = String::from_utf8_lossy(&buffer[..bytes_read]);
+            if let Ok(value) = read_timeout {
+                let bytes_read = value.unwrap();
+                let response = String::from_utf8_lossy(&buffer[..bytes_read]);
 
-                    app.log_add_top(format!("{} {}\n\n\n", "Response from server:", response));
+                app.log_add_top(format!("{} {}\n\n\n", "Response from server:", response));
 
-                    if let Some(deck) = parse_responses(&response, "##") {
-                        app.player.deck_from_str(deck);
-                    }
-
-                    if let Some(deck) = parse_responses(&response, "**") {
-                        app.tmp_deck = deck_from_str(deck);
-                    }
-
-                    if let Some(deck) = parse_responses(&response, "++") {
-                        app.opp_deck = deck_from_str(deck);
-                    }
-                    if let Some(won_player) = parse_responses(&response, "||") {
-                        if won_player != app.name {
-                            app.log_add_top(format!(
-                                "{} {} is the winner\n\n\n",
-                                "You lost. :(", won_player
-                            ));
-                        }
-                        let _ = update_ui(terminal, &app).await;
-
-                        sleep(Duration::from_secs(10)).await;
-                        break Ok(());
-                    }
-
-                    if response.trim().contains("It's your turn") {
-                        app.mode = InputMode::Message;
-                        // app.log_add_top(format!("{}\n", "Enter something"));
-                        // let _ = update_ui(terminal, &app).await;
-
-                        //
-                    } else if response.trim().starts_with("You won! Congrats!") {
-                        app.mode = InputMode::Normal;
-                        app.log_add_top(format!("{}\n", "Nice, You're the winner. Exiting."));
-                        let _ = update_ui(terminal, &app).await;
-
-                        sleep(Duration::from_secs(20)).await;
-
-                        break Ok(());
-                    } else {
-                        app.mode = InputMode::Normal;
-                    }
-
-                    if bytes_read == 0 {
-                        break Ok(());
-                    }
+                if let Some(deck) = parse_responses(&response, "##") {
+                    app.player.deck_from_str(deck);
                 }
-                Err(_) => {}
+
+                if let Some(deck) = parse_responses(&response, "**") {
+                    app.tmp_deck = deck_from_str(deck);
+                }
+
+                if let Some(deck) = parse_responses(&response, "++") {
+                    app.opp_deck = deck_from_str(deck);
+                }
+                if let Some(won_player) = parse_responses(&response, "||") {
+                    if won_player != app.name {
+                        app.log_add_top(format!(
+                            "{} {} is the winner\n\n\n",
+                            "You lost. :(", won_player
+                        ));
+                    }
+                    let _ = update_ui(terminal, app).await;
+
+                    sleep(Duration::from_secs(10)).await;
+                    break Ok(());
+                }
+
+                if response.trim().contains("It's your turn") {
+                    app.mode = InputMode::Message;
+                    // app.log_add_top(format!("{}\n", "Enter something"));
+                    // let _ = update_ui(terminal, &app).await;
+                } else if response.trim().starts_with("You won! Congrats!") {
+                    app.mode = InputMode::Normal;
+                    app.log_add_top(format!("{}\n", "Nice, You're the winner. Exiting."));
+                    let _ = update_ui(terminal, app).await;
+
+                    sleep(Duration::from_secs(20)).await;
+
+                    break Ok(());
+                } else {
+                    app.mode = InputMode::Normal;
+                }
+
+                if bytes_read == 0 {
+                    break Ok(());
+                }
             }
         }
     }
@@ -284,7 +282,7 @@ fn ui2(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(f.size());
+        .split(f.area());
 
     let inner_layout = Layout::new(
         Direction::Vertical,
@@ -445,12 +443,11 @@ fn ui2(f: &mut Frame, app: &App) {
                     davincicode::Color::WHITE => "W",
                 };
 
-                let card_value: String;
-                if card_item.status == davincicode::CardStatus::HIDDEN {
-                    card_value = "?".to_owned();
+                let card_value = if card_item.status == davincicode::CardStatus::HIDDEN {
+                    "?".to_owned()
                 } else {
-                    card_value = format!("{}", card_item.value);
-                }
+                    format!("{}", card_item.value)
+                };
                 let card_p =
                     Paragraph::new(Span::styled(format!("{} {}", card_color, card_value), s))
                         .block(Block::new().title("card").borders(Borders::ALL))
@@ -514,12 +511,11 @@ fn ui2(f: &mut Frame, app: &App) {
                     davincicode::Color::WHITE => "W",
                 };
 
-                let card_value: String;
-                if card_item.status == davincicode::CardStatus::HIDDEN {
-                    card_value = "?".to_owned();
+                let card_value = if card_item.status == davincicode::CardStatus::HIDDEN {
+                    "?".to_owned()
                 } else {
-                    card_value = format!("{}", card_item.value);
-                }
+                    format!("{}", card_item.value)
+                };
                 let card_p =
                     Paragraph::new(Span::styled(format!("{} {}", card_color, card_value), s))
                         .block(Block::new().title("card").borders(Borders::ALL))
@@ -599,27 +595,27 @@ fn parse_responses(input: &str, pattern: &str) -> Option<String> {
 
     match pattern {
         "##" => {
-            if let Some(res) = hashtags.get(0) {
+            if let Some(res) = hashtags.first() {
                 ret = res.to_string();
                 return Some(ret);
             }
         }
         "**" => {
-            if let Some(res) = asterisks.get(0) {
+            if let Some(res) = asterisks.first() {
                 ret = res.to_string();
                 return Some(ret);
             }
         }
 
         "++" => {
-            if let Some(res) = plus.get(0) {
+            if let Some(res) = plus.first() {
                 ret = res.to_string();
                 return Some(ret);
             }
         }
 
         "||" => {
-            if let Some(res) = pipe.get(0) {
+            if let Some(res) = pipe.first() {
                 ret = res.to_string();
                 return Some(ret);
             }

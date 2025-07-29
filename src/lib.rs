@@ -1,6 +1,6 @@
 use colored::Colorize;
 use rand::{seq::SliceRandom, Rng};
-use std::{cmp::Ordering, u32};
+use std::cmp::Ordering;
 
 #[derive(Debug)]
 pub struct Game {
@@ -115,7 +115,7 @@ impl Game {
     }
 
     pub fn shuffle_avail_card(&mut self) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         self.card_avail.shuffle(&mut rng);
     }
 
@@ -129,18 +129,18 @@ impl Game {
             match card.color {
                 Color::BLACK => {
                     if colorize {
-                        game_set.push_str(format!("{}", "B".blue()).as_str());
+                        game_set.push_str(&"B".blue());
                     } else {
-                        game_set.push_str(format!("{}", "B").as_str());
+                        game_set.push('B');
                     }
 
-                    if hide_values == true {
+                    if hide_values {
                         match card.status {
                             CardStatus::HIDDEN => {
                                 if colorize {
-                                    game_set.push_str(format!("{}", "?".blue()).as_str());
+                                    game_set.push_str(&"?".blue());
                                 } else {
-                                    game_set.push_str(format!("{}", "?").as_str());
+                                    game_set.push('?');
                                 }
                             }
                             CardStatus::REVEALED => {
@@ -149,35 +149,31 @@ impl Game {
                                         format!("{}", &card.value.to_string().blue()).as_str(),
                                     );
                                 } else {
-                                    game_set
-                                        .push_str(format!("{}", &card.value.to_string()).as_str());
+                                    game_set.push_str(&card.value.to_string());
                                 }
                             }
                         };
+                    } else if colorize {
+                        game_set.push_str(&card.value.to_string().blue());
                     } else {
-                        if colorize {
-                            game_set
-                                .push_str(format!("{}", &card.value.to_string().blue()).as_str());
-                        } else {
-                            game_set.push_str(format!("{}", &card.value.to_string()).as_str());
-                        }
+                        game_set.push_str(&card.value.to_string());
                     }
                 }
 
                 Color::WHITE => {
                     if colorize {
-                        game_set.push_str(format!("{}", "W".yellow()).as_str());
+                        game_set.push_str(&"W".yellow());
                     } else {
-                        game_set.push_str(format!("{}", "W").as_str());
+                        game_set.push('W');
                     }
 
-                    if hide_values == true {
+                    if hide_values {
                         match card.status {
                             CardStatus::HIDDEN => {
                                 if colorize {
-                                    game_set.push_str(format!("{}", "?".yellow()).as_str());
+                                    game_set.push_str(&"?".yellow());
                                 } else {
-                                    game_set.push_str(format!("{}", "?").as_str());
+                                    game_set.push('?');
                                 }
                             }
                             CardStatus::REVEALED => {
@@ -186,25 +182,20 @@ impl Game {
                                         format!("{}", &card.value.to_string().yellow()).as_str(),
                                     );
                                 } else {
-                                    game_set
-                                        .push_str(format!("{}", &card.value.to_string()).as_str());
+                                    game_set.push_str(&card.value.to_string());
                                 }
                             }
                         };
+                    } else if colorize {
+                        game_set.push_str(&card.value.to_string().yellow());
                     } else {
-                        if colorize {
-                            game_set
-                                .push_str(format!("{}", &card.value.to_string().yellow()).as_str());
-                        } else {
-                            game_set.push_str(format!("{}", &card.value.to_string()).as_str());
-                        }
+                        game_set.push_str(&card.value.to_string());
                     }
                 }
             };
 
             game_set.push_str(", ");
         }
-        game_set.push_str("\n");
 
         game_set
     }
@@ -323,12 +314,9 @@ impl Player {
                             _ => Color::BLACK,
                         };
 
-                        match card_value.parse::<u32>() {
-                            Ok(value) => {
-                                let a_card = Card::new(value, card_color);
-                                self.deck.push(a_card);
-                            }
-                            Err(_) => {}
+                        if let Ok(value) = card_value.parse::<u32>() {
+                            let a_card = Card::new(value, card_color);
+                            self.deck.push(a_card);
                         }
                     }
                 }
@@ -355,10 +343,10 @@ impl Player {
     }
 
     pub fn draw_card(&mut self, avail_card: &mut Vec<Card>) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let avail_len: u32 = avail_card.len() as u32;
-        let rand_pick: usize = rng.gen_range(0..=avail_len - 1) as usize;
+        let rand_pick: usize = rng.random_range(0..=avail_len - 1) as usize;
 
         // get the card
         let picked_card = avail_card[rand_pick];
@@ -374,10 +362,10 @@ impl Player {
     }
 
     pub fn draw_to_deck(&mut self, avail_card: &mut Vec<Card>) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let avail_len: u32 = avail_card.len() as u32;
-        let rand_pick: usize = rng.gen_range(0..=avail_len - 1) as usize;
+        let rand_pick: usize = rng.random_range(0..=avail_len - 1) as usize;
 
         // get the card
         let picked_card = avail_card[rand_pick];
@@ -419,17 +407,17 @@ impl Player {
             match card.color {
                 Color::BLACK => {
                     if colorize {
-                        hand.push_str(format!("{}", "B".blue()).as_str());
+                        hand.push_str(&"B".blue());
                     } else {
-                        hand.push_str(format!("{}", "B").as_str());
+                        hand.push('B');
                     }
-                    if opponent_view == true {
+                    if opponent_view {
                         match card.status {
                             CardStatus::HIDDEN => {
                                 if colorize {
-                                    hand.push_str(format!("{}", "?".blue()).as_str());
+                                    hand.push_str(&"?".blue());
                                 } else {
-                                    hand.push_str(format!("{}", "?").as_str());
+                                    hand.push('?');
                                 }
                             }
                             CardStatus::REVEALED => {
@@ -438,33 +426,31 @@ impl Player {
                                         format!("{}", &card.value.to_string().blue()).as_str(),
                                     );
                                 } else {
-                                    hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                                    hand.push_str(&card.value.to_string());
                                 }
                             }
                         };
+                    } else if colorize {
+                        hand.push_str(&card.value.to_string().blue());
                     } else {
-                        if colorize {
-                            hand.push_str(format!("{}", &card.value.to_string().blue()).as_str());
-                        } else {
-                            hand.push_str(format!("{}", &card.value.to_string()).as_str());
-                        }
+                        hand.push_str(&card.value.to_string());
                     }
                 }
 
                 Color::WHITE => {
                     if colorize {
-                        hand.push_str(format!("{}", "W".yellow()).as_str());
+                        hand.push_str(&"W".yellow());
                     } else {
-                        hand.push_str(format!("{}", "W").as_str());
+                        hand.push('W');
                     }
 
-                    if opponent_view == true {
+                    if opponent_view {
                         match card.status {
                             CardStatus::HIDDEN => {
                                 if colorize {
-                                    hand.push_str(format!("{}", "?".yellow()).as_str());
+                                    hand.push_str(&"?".yellow());
                                 } else {
-                                    hand.push_str(format!("{}", "?").as_str());
+                                    hand.push('?');
                                 }
                             }
                             CardStatus::REVEALED => {
@@ -473,22 +459,20 @@ impl Player {
                                         format!("{}", &card.value.to_string().yellow()).as_str(),
                                     );
                                 } else {
-                                    hand.push_str(format!("{}", &card.value.to_string()).as_str());
+                                    hand.push_str(&card.value.to_string());
                                 }
                             }
                         };
+                    } else if colorize {
+                        hand.push_str(&card.value.to_string().yellow());
                     } else {
-                        if colorize {
-                            hand.push_str(format!("{}", &card.value.to_string().yellow()).as_str());
-                        } else {
-                            hand.push_str(format!("{}", &card.value.to_string()).as_str());
-                        }
+                        hand.push_str(&card.value.to_string());
                     }
                 }
             };
             hand.push_str(", ");
         }
-        hand.push_str("\n");
+        // hand.push('\n');
 
         hand
     }

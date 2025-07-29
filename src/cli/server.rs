@@ -2,7 +2,7 @@ use colored::Colorize;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{u32, vec};
+use std::vec;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
@@ -14,11 +14,11 @@ use clap::Parser;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Server address
-    #[arg(short, long, default_value_t = String::from("8079"))]
+    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
     addr: String,
 
     /// Server port
-    #[arg(short, long, default_value_t = String::from("127.0.0.1"))]
+    #[arg(short, long, default_value_t = String::from("8079"))]
     port: String,
 
     /// Number of players
@@ -90,14 +90,12 @@ async fn loop_read_str(
         }
 
         let response = recv_something(stream).await;
-        match response.as_str() {
-            value => {
-                if value == v0 || value == v1 {
-                    return Some(response);
-                } else {
-                    println!("{}\n", "Dunno, asking again".red());
-                }
-            }
+
+        let value = response.as_str();
+        if value == v0 || value == v1 {
+            return Some(response);
+        } else {
+            println!("{}\n", "Dunno, asking again".red());
         }
     }
 }
@@ -121,7 +119,7 @@ async fn yes_variant_guess(
         // update the opponents_names with the new players (if any player lost and got removed)
         let mut opponents_names: Vec<String> = Vec::new();
         for p in the_game.players.iter() {
-            if p.name != String::from(player_name.clone()) {
+            if p.name != player_name {
                 opponents_names.push(String::from(&p.name));
             }
         }
@@ -163,7 +161,7 @@ async fn yes_variant_guess(
             break;
         }
 
-        if continue_guess == true {
+        if continue_guess {
             continue;
         } else {
             break;
@@ -195,7 +193,7 @@ async fn player_move(
     let current_player = the_game
         .players
         .iter()
-        .find(|player| player.name == player_name.to_string())
+        .find(|player| player.name == player_name)
         .expect("No player found\n");
 
     if can_t_draw_any {
@@ -216,13 +214,13 @@ async fn player_move(
     // build the opponents_names with the new players (if any player lost and got removed)
     let mut opponents_names: Vec<String> = Vec::new();
     for p in the_game.players.iter() {
-        if p.name != String::from(player_name.clone()) {
+        if p.name != player_name {
             opponents_names.push(String::from(&p.name));
         }
     }
     game_context.push_str(format!("\n{}", "Your opponents deck: ".yellow()).as_str());
     for opponent in the_game.players.iter() {
-        if opponent.name == String::from(opponents_names.get(0).unwrap()) {
+        if opponent.name == *opponents_names.first().unwrap() {
             game_context.push_str(format!("\n{}", "Player: ".blue()).as_str());
             game_context.push_str(&opponent.name);
             game_context.push_str(format!("{}", " ".blue()).as_str());
@@ -234,13 +232,13 @@ async fn player_move(
     game_context.push_str(format!("{}", "What your opponents see: ".yellow()).as_str());
     game_context.push_str(&current_player.show_hand(true, true));
 
-    game_context.push_str("\n");
+    game_context.push('\n');
 
     // read user input (card to pick)
     let picked_card_number: usize;
     let mut current_player_side_card: Option<davincicode::Card> = None;
 
-    if can_t_draw_any == false {
+    if !can_t_draw_any {
         let to_send = format!(
             "{} {}{}\n",
             "It's your turn".blue(),
@@ -263,18 +261,17 @@ async fn player_move(
         // draw the card here
         for p in the_game.players.iter_mut() {
             if p.name == player_name.clone() {
-                current_player_side_card = Some(
-                    p.draw_specific_card(&mut the_game.card_avail, picked_card_number as usize),
-                );
+                current_player_side_card =
+                    Some(p.draw_specific_card(&mut the_game.card_avail, picked_card_number));
             }
         }
     }
 
     // continue to ask if they want to keep it hidden now or guess opponent card
     // with the risk of making a bad guess and getting it revealed
-    loop {
+    {
         // if can't draw any, change the message
-        if can_t_draw_any == false {
+        if !can_t_draw_any {
             let mut to_send = String::new();
 
             to_send.push_str(format!("{}", "You picked a ".blue()).as_str());
@@ -322,7 +319,6 @@ async fn player_move(
                 }
                 _ => {}
             }
-            break;
         } else {
             // no more cards to draw, meaning that the only way to play is to make a guess. No
             // more choice. So spawn the yes_variant_guess.
@@ -333,7 +329,6 @@ async fn player_move(
                 &mut dialog_status,
             )
             .await;
-            break; // yes variant
         }
     }
 
@@ -347,7 +342,7 @@ async fn player_move(
                 }
             }
 
-            let mut to_send = format!("Okay, saving your side card as hidden.\n",);
+            let mut to_send: String = "Okay, saving your side card as hidden.\n".to_owned();
 
             to_send.push_str(format!("\n{}", "Your new deck: ".green()).as_str());
             for p in the_game.players.iter() {
@@ -362,9 +357,7 @@ async fn player_move(
                     to_send.push_str(&p.show_hand(true, true));
                 }
             }
-            if send_something(stream, &to_send).await {
-                return;
-            }
+            if send_something(stream, &to_send).await {}
         }
         2 => {
             // player picked a card, guess and lost, revealing their card
@@ -399,19 +392,13 @@ async fn player_move(
                 }
             }
 
-            if send_something(stream, &to_send).await {
-                return;
-            }
+            if send_something(stream, &to_send).await {}
         }
         GAME_END_CODE => {
             println!("We got a winner: {:?}\n", the_game.winner);
             // announce this to the remaining player
             let to_send = format!("{}", "You won! Congrats!".green(),);
-            if send_something(stream, &to_send).await {
-                return;
-            }
-
-            return;
+            if send_something(stream, &to_send).await {}
         }
         _ => {
             // what??
@@ -425,7 +412,7 @@ async fn guess_opponent_card_loop(
     stream: &mut TcpStream,
     the_game: &mut davincicode::Game,
     opponents_names: Vec<String>,
-    player_name: &String,
+    player_name: &str,
 ) -> i32 {
     let mut picked_card_number: usize;
     let mut golden_value: u32 = u32::MAX;
@@ -444,7 +431,7 @@ async fn guess_opponent_card_loop(
         to_send.push_str(format!("\n{}", "Your opponents deck: ".yellow()).as_str());
 
         for (idx, a_player) in the_game.players.iter().enumerate() {
-            if a_player.name == player_name.clone() {
+            if a_player.name == player_name {
                 continue;
             }
             to_send.push_str(
@@ -463,7 +450,7 @@ async fn guess_opponent_card_loop(
         }
 
         let mut op_idx = 0;
-        if skip_chose_op == false {
+        if !skip_chose_op {
             // pick the opponent
             op_idx = loop_read_uint(
                 stream,
@@ -589,10 +576,11 @@ async fn guess_opponent_card_loop(
         }
     }
     //
-    if correct_guess == true {
+    if correct_guess {
         return 1;
     }
-    return 0;
+
+    0
 }
 
 async fn game_process(
@@ -607,7 +595,7 @@ async fn game_process(
     player_order.push(current_player.clone());
 
     loop {
-        if the_game.game_status() == true {
+        if the_game.game_status() {
             break;
         }
         // report to lost players
@@ -653,7 +641,7 @@ async fn game_process(
 
     println!("left game_process");
 
-    return 0;
+    0
 }
 
 async fn game_run(
@@ -677,7 +665,7 @@ async fn game_run(
         let current_player = the_game
             .players
             .iter()
-            .find(|player| player.name == name.to_string())
+            .find(|player| player.name == name.as_str())
             .expect("No player found\n");
 
         to_send.push_str(&current_player.show_hand(false, true));
@@ -691,7 +679,7 @@ async fn game_run(
     let mut ret = String::new();
     broadcast_msg(player_tcp_name, "\n").await;
 
-    ret.push_str("\n");
+    ret.push('\n');
     for player in the_game.players.iter() {
         ret.push_str(&player.name);
         ret.push_str("'s cards: ");
@@ -703,8 +691,6 @@ async fn game_run(
     // process cmd of all clients
     game_process(&mut the_game, selected_player_name.clone(), player_tcp_name).await;
     println!("{}", "Game over".green());
-
-    return;
 }
 
 async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
@@ -735,8 +721,8 @@ async fn init_players(client_streams_vec: Arc<Mutex<Vec<TcpStream>>>) {
 
     println!("Players {:?}", player_tcp_name);
 
-    let mut rng = rand::thread_rng();
-    let selected_player_index = rng.gen_range(0..player_tcp_name.len());
+    let mut rng = rand::rng();
+    let selected_player_index = rng.random_range(0..player_tcp_name.len());
     let some_player_name = player_tcp_name
         .keys()
         .nth(selected_player_index)
@@ -811,7 +797,7 @@ async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<Tc
             request
         );
 
-        if request == "init".to_string() {
+        if request == "init" {
             if let Err(error) = stream
                 .write_all(String::from("Init successfull").as_bytes())
                 .await
@@ -825,7 +811,7 @@ async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<Tc
         }
     }
 
-    if init_player == false {
+    if !init_player {
         streams.remove(*client_id as usize);
         *client_id -= 1;
     }
@@ -833,7 +819,7 @@ async fn handle_client(client_id: &mut u32, client_streams_vec: Arc<Mutex<Vec<Tc
 
 async fn broadcast_msg(player_tcp_name: &mut HashMap<String, TcpStream>, cmd: &str) {
     for client_stream in player_tcp_name.values_mut() {
-        if send_something(client_stream, &format!("{}", cmd)).await {
+        if send_something(client_stream, cmd).await {
             continue;
         }
     }
