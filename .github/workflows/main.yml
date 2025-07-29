@@ -8,9 +8,6 @@ on:
 
   workflow_dispatch:
 
-env:
-ANY: 1
-
 jobs:
   build_test:
     name: "Main build and test using -> '${{ matrix.BUILD }}'"
