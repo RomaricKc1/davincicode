@@ -28,7 +28,7 @@ jobs:
           toolchain: ${{ matrix.RUST_VER }}
 
       - name: Build now
-        run: cargo build ${{ BUILD }}
+        run: cargo build ${{ matrix.BUILD }}
 
       - name: Test it
         run: cargo test
