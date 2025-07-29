@@ -24,7 +24,7 @@ jobs:
       - name: Install rust
         uses: dtolnay/rust-toolchain@master
         with:
-          component: clippy, rustfmt
+          components: clippy, rustfmt
           toolchain: ${{ matrix.RUST_VER }}
 
       - name: Build now
@@ -54,7 +54,7 @@ jobs:
       - name: Install rust
         uses: dtolnay/rust-toolchain@master
         with:
-          component: clippy, rustfmt
+          components: clippy, rustfmt
           toolchain: ${{ matrix.RUST_VER }}
 
       - name: Check the formatting
@@ -71,7 +71,7 @@ jobs:
       - name: Install rust
         uses: dtolnay/rust-toolchain@master
         with:
-          component: clippy, rustfmt
+          components: clippy, rustfmt
           toolchain: ${{ matrix.RUST_VER }}
 
       - name: Clippy
